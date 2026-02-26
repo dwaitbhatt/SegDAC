@@ -186,3 +186,5 @@ datasets
 random_action.py
 *.tar
 weights/
+_vizdoom.ini
+third_parties/
