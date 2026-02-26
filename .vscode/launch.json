@@ -13,7 +13,7 @@
             "justMyCode": false,
             "args": [
                 "+env=maniskill3/push_cube",
-                "algo=segdac",
+                "algo=segdac_sac",
                 "algo.proprioception_dim=9",
                 "logging.video_max_steps_per_traj=50",
                 "algo/grounding_text_tags=push_cube",
@@ -33,7 +33,7 @@
             "justMyCode": false,
             "args": [
                 "+env=maniskill3/pull_cube",
-                "algo=segdac",
+                "algo=segdac_sac",
                 "algo.proprioception_dim=9",
                 "logging.video_max_steps_per_traj=50",
                 "algo/grounding_text_tags=pull_cube",
@@ -53,7 +53,7 @@
             "justMyCode": false,
             "args": [
                 "+env=maniskill3/pick_cube",
-                "algo=segdac",
+                "algo=segdac_sac",
                 "algo.proprioception_dim=9",
                 "logging.video_max_steps_per_traj=50",
                 "algo/grounding_text_tags=pick_cube",
@@ -73,7 +73,7 @@
             "justMyCode": false,
             "args": [
                 "+env=maniskill3/poke_cube",
-                "algo=segdac",
+                "algo=segdac_sac",
                 "algo.proprioception_dim=9",
                 "logging.video_max_steps_per_traj=50",
                 "algo/grounding_text_tags=poke_cube",
@@ -93,7 +93,7 @@
             "justMyCode": false,
             "args": [
                 "+env=maniskill3/lift_peg_upright",
-                "algo=segdac",
+                "algo=segdac_sac",
                 "algo.proprioception_dim=9",
                 "logging.video_max_steps_per_traj=50",
                 "algo/grounding_text_tags=lift_peg_upright",
@@ -113,7 +113,7 @@
             "justMyCode": false,
             "args": [
                 "+env=maniskill3/pull_cube_tool",
-                "algo=segdac",
+                "algo=segdac_sac",
                 "algo.proprioception_dim=9",
                 "logging.video_max_steps_per_traj=100",
                 "algo/grounding_text_tags=pull_cube_tool",
@@ -133,7 +133,7 @@
             "justMyCode": false,
             "args": [
                 "+env=maniskill3/apple_in_bowl",
-                "algo=segdac",
+                "algo=segdac_sac",
                 "algo.proprioception_dim=25",
                 "logging.video_max_steps_per_traj=100",
                 "algo/grounding_text_tags=place_apple_in_bowl",
@@ -153,7 +153,7 @@
             "justMyCode": false,
             "args": [
                 "+env=maniskill3/transport_box",
-                "algo=segdac",
+                "algo=segdac_sac",
                 "algo.proprioception_dim=25",
                 "logging.video_max_steps_per_traj=100",
                 "algo/grounding_text_tags=transport_box",

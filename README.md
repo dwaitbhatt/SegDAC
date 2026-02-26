@@ -70,6 +70,10 @@
 - Sample efficiency results are stored under `https://github.com/SegDAC/SegDAC/tree/main/notebooks/results/eval/`
 - SegDAC test results are stored under `notebooks/results/test/segdac_sac_sam_enc_decoder_q_cond_final_aggregated_scores-0.json`, here final refers to the weights after 1M training steps (as used in the paper).
 
+## Prerequisites
+- Miniconda
+- A GPU that supports Vulkan
+
 ## Training
 Note : The setup assumes you are at the root of this repository, all setup scripts assume this.  
 1. ### Setup Simulation Frameworks.
@@ -181,16 +185,17 @@ Note : The setup assumes you are at the root of this repository, all setup scrip
             logging.video_max_steps_per_traj=50 \
             algo.proprioception_dim=9 \
             experiment.name="ms3_push_cube_segdac_sac"
-        ```
+        ```  
+        All training commands look very similar, you need to change `+env=maniskill3/push_cube` to the task you want to train (eg: `+env=maniskill3/pull_cube` for the pull_cube task), change `algo/grounding_text_tags` to point to the file under `configs/algo/grounding_text_tags` that matches the task or use `configs/algo/grounding_text_tags/single_list.yaml` if you want to use a shared list of tags for all tasks. The humanoid tasks have a different `env.maniskill3.obs_mode.camera_name` and different `algo.proprioception_dim` (see `.vscode/launch.json`).
+        Check the `.vscode/launch.json` file for similar commands for the baselines.  
 
 ## Visual Generalization Benchmark
+
+Once you have model weights from a training, you can run the visual generalization benchmark.  
+
 1. See `.vscode/launch.json` for more examples.  
     ```bash
     conda activate maniskill3_env
-    ```
-    If you haven't created the directories, create them : 
-    ```
-    mkdir ./datasets/ ./tmp_job_data/ ./final_job_data/
     ```
     Run the benchmark : 
     ```bash
