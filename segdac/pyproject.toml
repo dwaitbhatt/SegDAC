@@ -1,0 +1,35 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "segdac"
+version = "0.0.1"
+authors = [{ name = "Alexandre Brown", email = "alexandre.brown@mila.quebec" }]
+description = "SegDAC, a Segmentation-Driven Actor-Critic method for visual deep reinforcement learning"
+readme = "README.md"
+requires-python = ">=3.9"
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+]
+
+dependencies = [
+  "torch==2.5.1",
+  "torchvision==0.20.1",
+  "torchaudio==2.5.1",
+  "tensordict==0.6.2",
+  "einops==0.8.1",
+  "huggingface-hub==0.29.1",
+  "ultralytics==8.3.82",
+  "scikit-learn==1.6.1",
+  "xformers==0.0.29",
+]
+
+[project.urls]
+Homepage = "https://github.com/AlexandreBrown/SegDAC"
+Issues = "https://github.com/AlexandreBrown/SegDAC/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/segdac/"]

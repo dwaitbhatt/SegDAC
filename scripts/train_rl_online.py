@@ -1,7 +1,8 @@
 import hydra
+import sys
+import torch
 from segdac.agents.agent import Agent
 from segdac_dev.replay_buffers.facade import ReplayBufferFacade
-import torch
 from segdac_dev.logging.loggers.logger import Logger
 from comet_ml.exceptions import InterruptedExperiment
 from hydra.utils import instantiate
@@ -15,7 +16,11 @@ from segdac_dev.replay_buffers.segments.factory import (
 )
 from segdac_dev.trainers.rl_online_trainer import RlOnlineTrainer
 from segdac_dev.evaluation.rl_evaluator import RlEvaluator
-from segdac.action_scaling.env_action_scaler import TanhEnvActionScaler
+from segdac.action_scaling.env_action_scaler import (
+    IdentityEnvActionScaler,
+    TanhEnvActionScaler,
+)
+from segdac.action_scaling.env_action_scaler import MultiBinaryEnvActionScaler
 from segdac_dev.reproducibility.seed import set_seed
 from segdac_dev.logging.artifacts import log_model_weights
 from segdac_dev.conversion.numpy_to_torch import convert_dtype
@@ -41,6 +46,14 @@ def main(cfg: DictConfig):
     logger.set_name(cfg["experiment"]["name"])
     logger.add_tag(cfg["env"]["name"])
     logger.add_tag(cfg["algo"]["name"])
+    console_logger.info(f"Python : {sys.version}")
+    console_logger.info(f"PYTHONPATH : {sys.path}")
+    console_logger.info(f"PyTorch : {torch.__version__}")
+    console_logger.info(f"PyTorch CUDA : {torch.version.cuda}")
+    logger.log_other("python_version", sys.version)
+    logger.log_other("python_path", str(sys.path))
+    logger.log_other("torch_version", torch.__version__)
+    logger.log_other("torch_cuda_version", torch.version.cuda)
 
     logger.log_other("job_id", job_id)
     console_logger.info(f"Job ID: {job_id}")
@@ -62,22 +75,32 @@ def main(cfg: DictConfig):
 
     policy_device = torch.device(cfg["policy_device"])
 
-    action_low = train_env.action_space.low
-    action_high = train_env.action_space.high
-    env_action_scaler = TanhEnvActionScaler(
-        action_low=torch.as_tensor(
-            action_low, device=policy_device, dtype=convert_dtype(action_low.dtype)
-        ),
-        action_high=torch.as_tensor(
-            action_high, device=policy_device, dtype=convert_dtype(action_high.dtype)
-        ),
-    )
-
     console_logger.info(f"Policy Device: {policy_device}")
     train_env_device = cfg["training"]["env_config"]["device"]
     console_logger.info(f"Train Env Device: {train_env_device}")
     eval_env_device = cfg["evaluation"]["env_config"]["device"]
     console_logger.info(f"Eval Env Device: {eval_env_device}")
+
+    if cfg["env"].get("multi_binary", False):
+        env_action_scaler = MultiBinaryEnvActionScaler(
+            nb_binary_actions=int(train_env.action_space.n),
+            device=policy_device,
+        )
+    elif cfg["env"].get("discrete", False):
+        env_action_scaler = IdentityEnvActionScaler()
+    else:
+        action_low = train_env.action_space.low
+        action_high = train_env.action_space.high
+        env_action_scaler = TanhEnvActionScaler(
+            action_low=torch.as_tensor(
+                action_low, device=policy_device, dtype=convert_dtype(action_low.dtype)
+            ),
+            action_high=torch.as_tensor(
+                action_high,
+                device=policy_device,
+                dtype=convert_dtype(action_high.dtype),
+            ),
+        )
 
     agent_train: Agent = (
         instantiate(cfg["algo"]["agent"])(
@@ -149,7 +172,6 @@ def main(cfg: DictConfig):
         evaluator=evaluator,
         replay_buffer=replay_buffer,
         cfg=cfg,
-        env_action_scaler=env_action_scaler,
         job_id=job_id,
     )
 

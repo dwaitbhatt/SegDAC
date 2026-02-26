@@ -1,0 +1,83 @@
+name: "smg"
+
+# Config taken from paper and https://anonymous.4open.science/r/SMG/
+
+frame_stack: 3
+
+agent:
+  _partial_: true
+  _target_: smg.algorithms.smg.SMG
+  obs_shape: [0, 84, 84] # First dim is set automatically in code (see config updater)
+  action_shape: 0 # This set automatically in code (see config updater)
+  discount: 0.8
+  critic_tau: 0.01
+  encoder_tau: 0.05
+  actor_update_freq: 2
+  critic_target_update_freq: 2
+  num_shared_layers: 11
+  num_filters: 32
+  num_head_layers: 0
+  projection_dim: 256
+  hidden_dim: 1024
+  actor_log_std_min: -10
+  actor_log_std_max: 2
+  init_temperature: 0.1
+  actor_beta: 0.9
+  actor_lr: 1e-3
+  critic_beta: 0.9
+  critic_lr: 1e-3
+  critic_weight_decay: 0.0
+  alpha_lr: 1e-4
+  alpha_beta: 0.5
+  aux_update_freq: 2
+  consistency: 1
+  consistency_scale: 0.5
+  back_scale: 2
+  recon_scale: 1
+  mask_scale: 1
+  mask_percentage: 0.12
+  fore_scale: 0.1
+  action_scale: 1
+  grad_clip_norm: 100
+  aux_beta: 0.9
+  train_batch_size: ${oc.select:training.batch_size,1}
+  dataset_dir: "datasets/places365_standard/"
+
+config_updater:
+  _target_: segdac_dev.config.smg_config_updaters.SmgConfigUpdater
+
+env:
+  train_transforms:
+    - _target_: segdac_dev.envs.transforms.traj_ids.TrajIdsTransform
+      device: ${policy_device}
+      num_envs: ${oc.select:training.env_config.num_envs,0}
+    - _target_: segdac_dev.envs.transforms.frame_stack.FrameStackTransform
+      device: ${policy_device}
+      num_envs: ${oc.select:training.env_config.num_envs,0}
+      history_size: ${algo.frame_stack}
+      in_key: "pixels"
+      out_key: "pixels"
+  eval_transforms:
+    - _target_: segdac_dev.envs.transforms.traj_ids.TrajIdsTransform
+      device: ${policy_device}
+      num_envs: ${evaluation.env_config.num_envs}
+    - _target_: segdac_dev.envs.transforms.frame_stack.FrameStackTransform
+      device: ${policy_device}
+      num_envs: ${evaluation.env_config.num_envs}
+      history_size: ${algo.frame_stack}
+      in_key: "pixels"
+      out_key: "pixels"
+
+replay_buffer:
+  capacity: 1_000_000
+  keys_to_exclude: []
+  pre_save_transforms: []
+  save_transforms: []
+  sample_transforms:
+    - _target_: segdac_dev.replay_buffers.transforms.torchrl.kornia_random_crop.KorniaRandomCropTransform
+      in_keys:
+        - "pixels"
+      out_keys:
+        - "pixels"
+      pad: 4
+      include_next: true

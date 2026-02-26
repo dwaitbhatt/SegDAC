@@ -118,16 +118,13 @@ def main(cfg: DictConfig):
     cfg['env_6']['name'] = f"maniskill3_{cfg['env_6']['id']}"
     cfg['env_7']['name'] = f"maniskill3_{cfg['env_7']['id']}"
     cfg['env_8']['name'] = f"maniskill3_{cfg['env_8']['id']}"
+    envs_to_run = list(cfg["evaluation"]["envs_to_run"])
     env_configs = [
-        cfg["env_1"],
-        cfg["env_2"],
-        cfg["env_3"],
-        cfg["env_4"],
-        cfg["env_5"],
-        cfg["env_6"],
-        cfg["env_7"],
-        cfg["env_8"],
+        cfg[f"env_{env_id}"] for env_id in envs_to_run
     ]
+    console_logger.info(f"Environments to run: {[env_config['name'] for env_config in env_configs]}")
+    is_partial_run = len(env_configs) < 8
+    console_logger.info(f"Is partial run: {is_partial_run}")
     env_names = [env_config["name"] for env_config in env_configs]
     for env_name in env_names:
         logger.add_tag(env_name)
@@ -145,7 +142,8 @@ def main(cfg: DictConfig):
     seed = cfg["evaluation"]["seed"]
     set_seed(seed)
 
-    difficulties = ["easy", "medium", "hard"]
+    difficulties = list(cfg["evaluation"]["difficulties_to_run"])
+    console_logger.info(f"Difficulties to run: {difficulties}")
     policy_device = torch.device(cfg["policy_device"])
     console_logger.info(f"Policy Device: {policy_device}")
     test_env_device = cfg["evaluation"]["env_config"]["device"]
@@ -164,14 +162,16 @@ def main(cfg: DictConfig):
         }
     }
     try:
-        for env_id, env_config in enumerate(env_configs):
+        for relative_env_id, env_config in enumerate(env_configs):
             task_id = env_config["id"]
             console_logger.info(f"Task : {task_id}")
 
             env_max_frames_per_traj = int(env_config['max_frames_per_traj'])
             action_repeat = int(env_config['action_repeat'])
 
-            agent_weights_paths = list(cfg['agent_weights'][f"env_{env_id+1}"])
+            env_id = envs_to_run[relative_env_id]
+
+            agent_weights_paths = list(cfg['agent_weights'][f"env_{env_id}"])
 
             for agent_id, agent_weights_path in enumerate(agent_weights_paths):
                 console_logger.info(f"Model Seed Index : {agent_id}")
@@ -181,7 +181,7 @@ def main(cfg: DictConfig):
                 cfg_copy = copy.deepcopy(cfg)
                 with open_dict(cfg_copy):
                     cfg_copy.env = env_config
-                    cfg_copy.algo = cfg_copy[f"algo_{env_id+1}"]
+                    cfg_copy.algo = cfg_copy[f"algo_{env_id}"]
                 test_config = OmegaConf.to_container(
                     env_config['default_config'])
                 test_env = create_test_env(
@@ -211,9 +211,17 @@ def main(cfg: DictConfig):
                 agent.disable_stochasticity()
                 agent.disable_exploration()
 
-                console_logger.info("Loading agent model weights...")
-                agent_state_dict = torch.load(
-                    agent_weights_path, map_location=policy_device, weights_only=True)
+                console_logger.info(f"Loading agent model weights {agent_weights_path}...")
+
+                model_weights_exist = Path(agent_weights_path).exists()
+                console_logger.info(f"model_weights_exist {model_weights_exist}")
+
+                if model_weights_exist:
+                    agent_state_dict = torch.load(
+                        agent_weights_path, map_location=policy_device, weights_only=True
+                    )
+                else:
+                    agent_state_dict = None
                 agent.load_state_dict(
                     agent_state_dict,
                     strict=True,
@@ -235,10 +243,6 @@ def main(cfg: DictConfig):
                     action_repeat=action_repeat
                 )
                 test_env.close()
-
-                del test_env
-
-                torch.cuda.empty_cache()
 
                 baseline_return_score_normalized = env_seed_no_perturb_test_metrics[
                     f"{logging_prefix}return"] / env_max_frames_per_traj
@@ -269,7 +273,7 @@ def main(cfg: DictConfig):
                         cfg_copy = copy.deepcopy(cfg)
                         with open_dict(cfg_copy):
                             cfg_copy.env = env_config
-                            cfg_copy.algo = cfg_copy[f"algo_{env_id+1}"]
+                            cfg_copy.algo = cfg_copy[f"algo_{env_id}"]
                         test_config = OmegaConf.to_container(
                             env_config['default_config'])
                         recursive_override(
@@ -294,10 +298,6 @@ def main(cfg: DictConfig):
                             action_repeat=int(env_config['action_repeat'])
                         )
                         test_env.close()
-
-                        del test_env
-
-                        torch.cuda.empty_cache()
 
                         new_return_score_normalized = env_seed_diff_test_metrics[
                             f"{logging_prefix}return"] / env_max_frames_per_traj
@@ -337,6 +337,10 @@ def main(cfg: DictConfig):
         with open(test_results_path, 'w') as f:
             json.dump(metrics_data, f)
         logger.log_asset(str(test_results_path.resolve()), step=0)
+        
+        if is_partial_run:
+            console_logger.info("Partial run detected, skipping score aggregation...")
+            return
 
         console_logger.info("Aggregating scores...")
 

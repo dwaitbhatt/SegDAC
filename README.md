@@ -5,7 +5,7 @@
   </h1>
 
   <p style="margin: 0 0 0.8rem; font-size: 1.1rem;">
-    <strong>Seg</strong>mentation-<strong>D</strong>riven <strong>A</strong>ctor-<strong>C</strong>ritic for Visual Reinforcement Learning
+    <strong>SegDAC: Improving Visual Reinforcement Learning by Extracting Dynamic Object-Centric Representations from Pretrained Vision Models</strong>
   </p>
 
   <p>
@@ -41,7 +41,7 @@
     <a href="https://neo-x.github.io/">Glen Berseth</a>
   </p>
   <p style="margin: 0; font-size: 0.95rem; color: #ffffffff;">
-    Mila – Quebec AI Institute · Université de Montréal · 2025
+    Mila – Quebec AI Institute · Université de Montréal · 2026
   </p>
 
   <p style="margin: 1rem 0 0.2rem; max-width: 820px;">
@@ -55,17 +55,7 @@
  
 </div>
 
-<hr style="border: 0; border-top: 1px solid #e5e7eb; margin: 1.2rem 0 1.6rem;">
-
-# TODOs
-- [x] Add README instructions 
-- [x] Add Case Study Videos
-- [x] Add Eval & Test Results + Notebook Examples
-- [x] Add Baselines Submodules
-- [ ] Add Model Code
-- [ ] Add Training Code
-- [ ] Add Visual Generalization Benchmark Code & Assets
-- [ ] Add Links To Model Weights  
+<hr style="border: 0; border-top: 1px solid #e5e7eb; margin: 1.2rem 0 1.6rem;"> 
 
 ## Repo Structure
 
@@ -102,11 +92,11 @@ Note : The setup assumes you are at the root of this repository, all setup scrip
     git submodule update --init --recursive
     ```
     #### [DDPG](https://arxiv.org/abs/1509.02971)  
-    - No setup required, already included in `segdac`.
+    - No setup required, already included in `segdac/`.
     #### [TD3](https://arxiv.org/abs/1802.09477)  
-    - No setup required, already included in `segdac`.
+    - No setup required, already included in `segdac/`.
     #### [SAC](https://arxiv.org/abs/1812.05905)  
-    - No setup required, already included in `segdac`.
+    - No setup required, already included in `segdac/`.
     #### [DrqV2](https://arxiv.org/abs/2107.09645)  
     ```bash
     source ./baselines/drqv2/setup.sh
@@ -123,9 +113,18 @@ Note : The setup assumes you are at the root of this repository, all setup scrip
     ```bash
     source ./baselines/ftd/setup.sh
     ```  
+    #### [SAM-G](https://arxiv.org/abs/2312.17116)  
+    ```bash
+    source ./baselines/samg/setup.sh
+    ```  
+    #### [SMG](https://arxiv.org/abs/2410.10834)  
+    ```bash
+    source ./baselines/smg/setup.sh
+    ```  
 
 1. ### Launch Training
-    1. (Optional but recommended) Setup CometML logging   
+    1. **(Optional but recommended if you want to log metrics)**   
+        **Setup CometML logging**   
         Note : If you ignore this step, CometML logging will be disabled and while the training will work, you won't get metrics logging during training. Evaluation videos will still be created and model weights will still be saved without CometML logging enabled.   
         ```bash
         export COMET_API_KEY=<YOUR_API_KEY>
@@ -137,24 +136,51 @@ Note : The setup assumes you are at the root of this repository, all setup scrip
         ```bash
         conda activate maniskill3_env
         ```
+        ```
+        mkdir ./datasets/ ./tmp_job_data/ ./final_job_data/
+        ```
+
+        #### **SegDAC Training Examples**
+        **Push Cube**
         ```bash
         python scripts/train_rl_online.py \
-            algo.env.transforms.grounded_seg.segmentation_model.object_detector_weights_path="./weights/yolov8s-worldv2.pt" \
-            algo.env.transforms.grounded_seg.segmentation_model.segmenter_weights_path="./weights/efficientvit_sam_l0.pt" \
+            dataset_dir=./datasets/ \
+            tmp_job_data_dir=./tmp_job_data \
+            final_job_data_dir=./final_job_data \
             +env=maniskill3/push_cube \
-            algo=segdac \
+            algo=segdac_sac \
             algo/grounding_text_tags=push_cube \
-            env.maniskill3.obs_mode.camera_name=base_camera \
             env/maniskill3/obs_mode=proprio_rgb \
+            env.maniskill3.obs_mode.camera_name=base_camera \
             env.pixels.height=512 \
             env.pixels.width=512 \
             logging.video_height=256 \
             logging.video_width=256 \
-            algo.agent.critic.gamma=0.80 \
+            algo.agent.critic.gamma=0.8 \
+            algo.decoder_embedding_dim=128 \
+            algo.actor_nb_query_tokens=1 \
+            algo.action_projection_head_in_features=128 \
+            algo.critic_nb_query_tokens=1 \
+            algo.q_value_projection_head_in_features=128 \
+            algo.agent.action_sampling_strategy.actor.network.decoder.num_layers=6 \
+            algo.agent.action_sampling_strategy.actor.network.decoder.num_heads=8 \
+            algo.agent.action_sampling_strategy.actor.network.decoder.d_ff=1024 \
+            algo.agent.action_sampling_strategy.actor.network.decoder.dropout=0.0 \
+            algo.agent.action_sampling_strategy.actor.policy_optimizer.lr=3e-4 \
+            algo.agent.action_sampling_strategy.actor.entropy_optimizer.lr=3e-4 \
+            algo.agent.critic.q_function_optimizer.lr=5e-4 \
+            algo.agent.critic_update_frequency=1 \
+            algo.agent.actor_update_frequency=1 \
+            algo.agent.target_networks_update_frequency=2 \
+            algo.target_params_updater.tau=0.01 \
+            algo.q_function.decoder.num_layers=6 \
+            algo.q_function.decoder.num_heads=8 \
+            algo.q_function.decoder.d_ff=1024 \
+            training.seed=42 \
+            evaluation.seed=123 \
             logging.video_max_steps_per_traj=50 \
             algo.proprioception_dim=9 \
-            training.seed=42 \
-            evaluation.seed=123
+            experiment.name="ms3_push_cube_segdac_sac"
         ```
 
 ## Visual Generalization Benchmark
@@ -162,6 +188,11 @@ Note : The setup assumes you are at the root of this repository, all setup scrip
     ```bash
     conda activate maniskill3_env
     ```
+    If you haven't created the directories, create them : 
+    ```
+    mkdir ./datasets/ ./tmp_job_data/ ./final_job_data/
+    ```
+    Run the benchmark : 
     ```bash
     python scripts/test_visual_generalization.py \
       "algo@algo_1=segdac" \
@@ -232,10 +263,10 @@ Note : The setup assumes you are at the root of this repository, all setup scrip
 Please use the following BibTeX entry to cite our work:
 
 ```
-@misc{brown2025segdacsegmentationdrivenactorcriticvisual,
-      title={SegDAC: Segmentation-Driven Actor-Critic for Visual Reinforcement Learning}, 
+@misc{brown2026segdacimprovingvisualreinforcement,
+      title={SegDAC: Improving Visual Reinforcement Learning by Extracting Dynamic Object-Centric Representations from Pretrained Vision Models}, 
       author={Alexandre Brown and Glen Berseth},
-      year={2025},
+      year={2026},
       eprint={2508.09325},
       archivePrefix={arXiv},
       primaryClass={cs.CV},

@@ -45,6 +45,8 @@ From: nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
         mkdir /final_job_data/
 
         cd /my_container/setup/
+        conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
+        conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
         conda env create --file envs/maniskill3/environment.yaml -y
         . /opt/conda/etc/profile.d/conda.sh
         conda activate /opt/conda/envs/maniskill3_env

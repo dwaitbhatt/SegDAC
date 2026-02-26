@@ -1,0 +1,100 @@
+defaults:
+  - _self_
+  - grounding_text_tags: viz_basic
+
+name: "dqn"
+
+frame_stack: 4
+
+agent:
+  _partial_: true
+  _target_: segdac.agents.dqn.agent.DqnAgent
+  device: ${policy_device}
+  seed: ${training.seed}
+  epsilon_end: 0.01
+  epsilon_decay_frames: 1_000_000
+  critic:
+    _target_: segdac.agents.dqn.critic.DqnCritic
+    target_params_updater: ${algo.target_params_updater}
+    gamma: 0.99
+    q_function: ${algo.q_function}
+    q_function_loss:
+      _target_: torch.nn.MSELoss
+    q_function_optimizer:
+      _partial_: true
+      _target_: torch.optim.Adam
+      lr: 1e-4
+      weight_decay: 0
+    max_grad_norm: 10.0
+  critic_update_frequency: 1
+  target_networks_update_frequency: 500
+  nb_actions: 0 # This is set automatically in code
+
+target_params_updater:
+  _target_: segdac.agents.target_networks_params_updaters.hard_updater.HardParametersUpdater
+
+q_function:
+  _target_: segdac.networks.network_wrapper.CriticTensorDictNetworkWrapper
+  network:
+    _target_: segdac.networks.dqn.DqnC51Network
+    nb_actions: 0 # This is set automatically in code
+    in_channels: 0 # This is set automatically in code
+  in_keys:
+    - "pixels_transformed"
+
+config_updater:
+  _target_: segdac_dev.config.dqn_config_updaters.DqnConfigUpdater
+
+env:
+  transforms:
+    resize:
+      _target_: segdac_dev.envs.transforms.resize.ResizeTransform
+      device: ${policy_device}
+      in_key: "pixels"
+      out_key: "pixels"
+      size: 84
+    tofloat32:
+      _target_: segdac_dev.envs.transforms.to_float32.ToFloat32Transform
+      device: ${policy_device}
+      in_key: "pixels"
+      out_key: "pixels_transformed"
+  train_transforms:
+    - _target_: segdac_dev.envs.transforms.traj_ids.TrajIdsTransform
+      device: ${policy_device}
+      num_envs: ${oc.select:training.env_config.num_envs,0}
+    - _target_: segdac_dev.envs.transforms.image_ids.ImageIdsTransform
+      device: ${policy_device}
+      num_envs: ${oc.select:training.env_config.num_envs,0}
+    - ${algo.env.transforms.resize}
+    - _target_: segdac_dev.envs.transforms.frame_stack.FrameStackTransform
+      device: ${policy_device}
+      num_envs: ${oc.select:training.env_config.num_envs,0}
+      history_size: ${algo.frame_stack}
+      in_key: "pixels"
+      out_key: "pixels"
+    - ${algo.env.transforms.tofloat32}
+  eval_transforms:
+    - _target_: segdac_dev.envs.transforms.traj_ids.TrajIdsTransform
+      device: ${policy_device}
+      num_envs: ${evaluation.env_config.num_envs}
+    - _target_: segdac_dev.envs.transforms.image_ids.ImageIdsTransform
+      device: ${policy_device}
+      num_envs: ${evaluation.env_config.num_envs}
+    - ${algo.env.transforms.resize}
+    - _target_: segdac_dev.envs.transforms.frame_stack.FrameStackTransform
+      device: ${policy_device}
+      num_envs: ${evaluation.env_config.num_envs}
+      history_size: ${algo.frame_stack}
+      in_key: "pixels"
+      out_key: "pixels"
+    - ${algo.env.transforms.tofloat32}
+replay_buffer:
+  capacity: 1_000_000
+  keys_to_exclude: ["pixels_transformed"]
+  save_transforms: []
+  sample_transforms:
+    - _target_: segdac_dev.replay_buffers.transforms.torchrl.to_float32.ToFloat32Transform
+      in_keys: 
+        - "pixels"
+      out_keys:
+        - "pixels_transformed"
