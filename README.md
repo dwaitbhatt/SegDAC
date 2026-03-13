@@ -5,7 +5,7 @@
   </h1>
 
   <p style="margin: 0 0 0.8rem; font-size: 1.1rem;">
-    <strong>SegDAC: Improving Visual Reinforcement Learning by Extracting Dynamic Object-Centric Representations from Pretrained Vision Models</strong>
+    <strong>SegDAC: Visual Generalization in Reinforcement Learning via Dynamic Object Tokens</strong>
   </p>
 
   <p>
@@ -268,8 +268,8 @@ Once you have model weights from a training, you can run the visual generalizati
 Please use the following BibTeX entry to cite our work:
 
 ```
-@misc{brown2026segdacimprovingvisualreinforcement,
-      title={SegDAC: Improving Visual Reinforcement Learning by Extracting Dynamic Object-Centric Representations from Pretrained Vision Models}, 
+@misc{brown2026segdac,
+      title={SegDAC: Visual Generalization in Reinforcement Learning via Dynamic Object Tokens}, 
       author={Alexandre Brown and Glen Berseth},
       year={2026},
       eprint={2508.09325},
