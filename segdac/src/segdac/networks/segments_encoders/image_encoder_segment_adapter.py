@@ -7,8 +7,8 @@ per-segment token ``TensorDict`` layout.
   we call it on ``rgb_segments`` stacked as a batch.
 * ``mode="spatial_from_full_image"`` — encoder returns a feature map ``(B,C,h,w)``;
   we call it on the full segmenter-res frame once and pool with
-  :func:`pool_spatial_map_to_per_segment_embeddings` (second EfficientViT-SAM forward
-  if used next to :class:`GroundedEfficientVitSam`).
+  :func:`pool_spatial_map_to_per_segment_embeddings` (e.g. second EfficientViT-SAM
+  image encoder, or a DINOv2 **dense patch map** from :class:`~segdac.networks.image_encoders.dinov2.DinoV2DenseMapEncoder`).
 """
 
 from __future__ import annotations
@@ -64,7 +64,7 @@ class ImageEncoderSegmentTokensAdapter(nn.Module):
     """
     ``forward(segments_data, image_01=None)`` — when ``mode`` is
     ``spatial_from_full_image``, pass segmenter-res ``(B,3,S,S)`` in ``image_01``.
-    Set :attr:`needs_full_image` is True in that mode (see :func:`test.extract_object_tokens`).
+    :attr:`needs_full_image` is True in that mode (see :func:`test.extract_object_tokens`).
     """
 
     needs_full_image: bool

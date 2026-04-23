@@ -3,7 +3,7 @@
 ManiSkill vs SegDAC, aligned with mani_skill/examples/demo_vis_segmentation.py:
 
 - The RGB + simulator segmentation are always the current state of the running env.
-- **Interactive (default):** a Matplotlib window shows a 4-in-1 panel (like tiling in the
+- **Interactive (default):** a Matplotlib window shows a 1x6 panel row (like tiling in the
   demo). Press **SPACE** to apply a **random** `env.action_space.sample()` step
   (same as the ManiSkill demo) and update the view with SegDAC on the **new** frame.
   **Q** or **Esc** quits. Run with `--one-shot` for a single static frame, save, exit.
@@ -11,10 +11,10 @@ ManiSkill vs SegDAC, aligned with mani_skill/examples/demo_vis_segmentation.py:
   segment + SAM-encoder object tokens) with no matplotlib.
 
 SegDAC runs on RGB at the **segmenter spatial size** (512 for EfficientViT-SAM
-l0–l2, see `GroundedEfficientVitSam.get_segmenter_image_size`). The default
-camera is **512×512** so RGB matches that resolution; other sizes are bilinearly
-resized for SegDAC. YOLO-World still uses 640×640 internally. ManiSkill panels
-use native camera H×W; SegDAC panels match when H=W=512, otherwise outputs are
+l0-l2, see `GroundedEfficientVitSam.get_segmenter_image_size`). The default
+camera is **512x512** so RGB matches that resolution; other sizes are bilinearly
+resized for SegDAC. YOLO-World still uses 640x640 internally. ManiSkill panels
+use native camera HxW; SegDAC panels match when H=W=512, otherwise outputs are
 resampled for the mosaic.
 """
 
@@ -39,6 +39,9 @@ from segdac.networks.image_segmentation_models.grounded_efficientvit_sam import 
 )
 from segdac.networks.segments_encoders.sam_encoder_segments_encoder import (
     SamEncoderEmbeddingsSegmentsEncoder,
+)
+from segdac.networks.segments_encoders.segment_token_utils import (
+    spatial_pool_selection_mask,
 )
 
 signal.signal(signal.SIGINT, signal.SIG_DFL)  # allow ctrl+c, like the ManiSkill demo
@@ -186,9 +189,9 @@ def build_parser() -> argparse.ArgumentParser:
         type=str,
         choices=("sam", "dinov2", "random", "sam_image"),
         default="sam",
-        help="Object tokens: sam=pool SAM feature map (default); dinov2=DinoV2ImageEncoder+adapter "
-        "on rgb_segments; random=RandomImageEncoder+adapter (debug); "
-        "sam_image=image_encoders.SamImageEncoder+spatial adapter (2nd ViT run vs segment model).",
+        help="Object tokens: sam=pool SAM feature map (default); dinov2=DINO patch map on full frame "
+        "+ same mask-cell pool as SAM (spatial adapter); random=RandomImageEncoder+adapter (debug); "
+        "sam_image=SamImageEncoder+spatial adapter (2nd ViT run vs segment model).",
     )
     p.add_argument(
         "--random-encoder-dim",
@@ -358,7 +361,7 @@ def run_fps_benchmark(
     )
     tok_lbl = {
         "sam": "SAM-feature pool (SegDAC head)",
-        "dinov2": "DinoV2ImageEncoder + segment adapter (global)",
+        "dinov2": "DINO dense patch map + mask pool (spatial adapter)",
         "random": "RandomImageEncoder + segment adapter (global)",
         "sam_image": "SamImageEncoder + segment adapter (spatial, extra ViT run)",
     }.get(
@@ -416,6 +419,209 @@ def pixels_to_segmenter_res(
     )
 
 
+def _token_encoder_min_pixels(seg_enc: nn.Module) -> int:
+    return int(getattr(seg_enc, "min_pixels", 4))
+
+
+def _fg_boundary_hw(mask_hw: torch.Tensor) -> torch.Tensor:
+    """Foreground inner edge for 2D ``mask_hw`` (H, W), True where ``> 0.5`` meets background."""
+    u = (mask_hw > 0.5).float().view(1, 1, mask_hw.shape[-2], mask_hw.shape[-1])
+    eroded = 1.0 - F.max_pool2d(1.0 - u, kernel_size=3, stride=1, padding=1)
+    inside = u > 0.5
+    core = eroded > 0.99
+    return (inside & ~core).squeeze(0).squeeze(0)
+
+
+def _thicken_bool_hw(b_hw: torch.Tensor, radius: int) -> torch.Tensor:
+    """Expand True pixels by ``radius`` (square max-pool)."""
+    if radius <= 0:
+        return b_hw
+    h, w = int(b_hw.shape[-2]), int(b_hw.shape[-1])
+    x = b_hw.float().view(1, 1, h, w)
+    k = 2 * int(radius) + 1
+    pad = int(radius)
+    return (F.max_pool2d(x, kernel_size=k, stride=1, padding=pad) > 0.5).squeeze(
+        0
+    ).squeeze(0)
+
+
+# Pastel RGB in [0,1] for per-object pooled-cell outlines (cycled by relative_segment_ids).
+_TOKEN_OUTLINE_PASTELS: tuple[tuple[float, float, float], ...] = (
+    (0.78, 0.86, 0.96),
+    (0.96, 0.82, 0.90),
+    (0.82, 0.92, 0.84),
+    (0.94, 0.88, 0.78),
+    (0.88, 0.82, 0.95),
+    (0.80, 0.90, 0.92),
+    (0.92, 0.86, 0.82),
+    (0.84, 0.88, 0.92),
+    (0.90, 0.84, 0.88),
+    (0.78, 0.90, 0.88),
+    (0.92, 0.90, 0.78),
+    (0.86, 0.88, 0.90),
+)
+
+
+# Leading PCA directions (3×C) from the previous token-viz frame; aligned by Procrustes.
+_pca_prev_vh: np.ndarray | None = None
+_pca_prev_c: int | None = None
+
+
+def _pca_features_to_rgb_01(feats: np.ndarray) -> np.ndarray:
+    """
+    (K, C) -> (K, 3) in [0, 1]. PCA on centered ``feats`` (variance axes in feature space).
+
+    To reduce frame-to-frame hue flips while keeping PCA geometry, when ``K >= 3`` and
+    three principal directions exist we rotate them with orthogonal Procrustes so they
+    best match the previous frame's 3×C basis (same ``C``); then min–max normalize RGB.
+    """
+    global _pca_prev_vh, _pca_prev_c
+    if feats.shape[0] == 0:
+        return np.zeros((0, 3), dtype=np.float64)
+    c = int(feats.shape[1])
+    if feats.shape[0] == 1:
+        return np.full((1, 3), 0.5, dtype=np.float64)
+    x = feats.astype(np.float64)
+    mean = x.mean(axis=0, keepdims=True)
+    xc = x - mean
+    _, _, vh = np.linalg.svd(xc, full_matrices=False)
+    n_comp = min(3, int(vh.shape[0]))
+    if n_comp < 3:
+        _pca_prev_vh = None
+        _pca_prev_c = None
+        proj = xc @ vh[:n_comp].T
+        if n_comp < 3:
+            proj = np.concatenate(
+                [proj, np.zeros((proj.shape[0], 3 - n_comp), dtype=np.float64)],
+                axis=1,
+            )
+    else:
+        b = vh[:3].copy()
+        if _pca_prev_vh is not None and _pca_prev_c == c and _pca_prev_vh.shape == (3, c):
+            m_align = b @ _pca_prev_vh.T
+            u_a, _, vt_a = np.linalg.svd(m_align, full_matrices=False)
+            r_a = u_a @ vt_a
+            b = r_a @ b
+        _pca_prev_vh = b.copy()
+        _pca_prev_c = c
+        proj = xc @ b.T
+    lo = proj.min(axis=0)
+    hi = proj.max(axis=0)
+    denom = np.maximum(hi - lo, 1e-6)
+    return np.clip((proj - lo) / denom, 0.0, 1.0)
+
+
+@torch.inference_mode()
+def build_token_encoder_viz(
+    sd,
+    pixels_seg: torch.Tensor,
+    seg_enc: nn.Module,
+    seg_model: GroundedEfficientVitSam,
+    token_encoder: str,
+    sam_feature_map: torch.Tensor | None,
+    _min_pixels: int,
+) -> torch.Tensor:
+    """
+    Segmenter-res float RGB (S, S, 3) in [0, 1]: full-frame PCA on encoder features over
+    ``pixels_seg[0]`` (Procrustes-aligned PCs when rank allows), dimmed RGB underlay, then
+    encoder cells that contribute to any object token (same mask-cell rule as pooling) are
+    brightened on the PCA map and other cells dimmed; each object's pooled cells get a
+    distinct pastel outline (by ``relative_segment_ids``). ``_min_pixels`` must match the
+    segment encoder pooling threshold.
+    """
+    s = int(seg_model.segmenter_image_size)
+    device = pixels_seg.device
+    bg = pixels_seg[0].clamp(0, 1).permute(1, 2, 0).contiguous()
+    n_seg = int(sd.batch_size[0])
+    if n_seg == 0:
+        return bg
+
+    alpha_feat = 0.56
+    bg_dim_mul = 0.64
+    pca_cell_dim = 0.38
+    pca_cell_bright = 1.06
+
+    if token_encoder == "random":
+        out = bg.clone()
+        out[:, :, 1] = out[:, :, 1] * 0.55 + 0.22
+        return out.clamp(0, 1)
+
+    panel_b = 0
+
+    if token_encoder in ("sam", "sam_image", "dinov2"):
+        if token_encoder == "sam":
+            if sam_feature_map is None:
+                return bg
+            feat = sam_feature_map
+        else:
+            enc = getattr(seg_enc, "image_encoder", None)
+            if enc is None:
+                return bg
+            feat = enc(pixels_seg)
+        feat = feat.float()
+        if int(feat.shape[0]) <= panel_b:
+            return bg
+        hf, wf = int(feat.shape[-2]), int(feat.shape[-1])
+        c = int(feat.shape[1])
+        vecs = feat[panel_b].permute(1, 2, 0).reshape(-1, c).contiguous().cpu().numpy()
+        rgb_k = _pca_features_to_rgb_01(vecs)
+        rgb_low = torch.from_numpy(rgb_k.reshape(hf, wf, 3)).to(
+            device=device, dtype=torch.float32
+        ).permute(2, 0, 1)
+        pca_hi = (
+            F.interpolate(
+                rgb_low.unsqueeze(0),
+                size=(s, s),
+                mode="nearest",
+            )[0]
+            .permute(1, 2, 0)
+            .contiguous()
+        )
+        mp = int(_min_pixels)
+        sel = spatial_pool_selection_mask(
+            sd,
+            feat,
+            segmenter_image_size=s,
+            min_pixels=mp,
+        )
+        pooled_union = torch.zeros(hf, wf, dtype=torch.bool, device=device)
+        ids = sd["image_ids"]
+        for si in range(n_seg):
+            if int(ids[si].item()) != panel_b:
+                continue
+            pooled_union = pooled_union | sel[si]
+        w_low = pooled_union.float().view(1, 1, hf, wf)
+        w_up = F.interpolate(w_low, size=(s, s), mode="nearest")[0, 0].unsqueeze(-1)
+        gain = pca_cell_dim + (pca_cell_bright - pca_cell_dim) * w_up
+        pca_hi = (pca_hi * gain).clamp(0.0, 1.0)
+        bg_dim = bg * bg_dim_mul
+        out = (1.0 - alpha_feat) * bg_dim + alpha_feat * pca_hi
+        rel = sd["relative_segment_ids"]
+        line_w = 0.66
+        n_pal = len(_TOKEN_OUTLINE_PASTELS)
+        for si in range(n_seg):
+            if int(ids[si].item()) != panel_b:
+                continue
+            one = sel[si]
+            if not bool(one.any().item()):
+                continue
+            w_i = F.interpolate(
+                one.float().view(1, 1, hf, wf), size=(s, s), mode="nearest"
+            )[0, 0]
+            bd = _fg_boundary_hw(w_i)
+            if not bool(bd.any().item()):
+                continue
+            bd = _thicken_bool_hw(bd, radius=2)
+            pi = int(rel[si].item()) % n_pal
+            col = _TOKEN_OUTLINE_PASTELS[pi]
+            b3 = bd.unsqueeze(-1).to(dtype=out.dtype)
+            c = out.new_tensor(col).view(1, 1, 3)
+            out = out * (1.0 - line_w * b3) + c * (line_w * b3)
+        return out.clamp(0, 1)
+
+    return bg
+
+
 def render_yolo_world_detections(
     rgb_u8: np.ndarray,
     xyxy_list: list,
@@ -427,6 +633,12 @@ def render_yolo_world_detections(
     YOLO-World boxes are in 640x640 preprocessed image space; map to native (H,W) of rgb_u8.
     """
     h, w = int(rgb_u8.shape[0]), int(rgb_u8.shape[1])
+    if (
+        not xyxy_list
+        or batch_index >= len(xyxy_list)
+        or batch_index >= len(classes_list)
+    ):
+        return rgb_u8.copy()
     xyxy = xyxy_list[batch_index]
     cls_t = classes_list[batch_index]
     if xyxy is None or xyxy.numel() == 0:
@@ -437,8 +649,14 @@ def render_yolo_world_detections(
     boxes[:, [0, 2]] = boxes[:, [0, 2]].clamp(0, float(w - 1))
     boxes[:, [1, 3]] = boxes[:, [1, 3]].clamp(0, float(h - 1))
     labels: list[str] = []
-    for c in cls_t.long().flatten():
-        ci = int(c.item())
+    cls_flat = cls_t.long().flatten()
+    n_box = int(boxes.shape[0])
+    pal_n = int(len(color_pallete))
+    box_colors: list[tuple[int, int, int]] = []
+    for bi in range(n_box):
+        ci = int(cls_flat[bi].item()) if bi < cls_flat.numel() else 0
+        rgb = color_pallete[ci % pal_n]
+        box_colors.append((int(rgb[0]), int(rgb[1]), int(rgb[2])))
         if 0 <= ci < len(grounding_tags):
             labels.append(grounding_tags[ci])
         else:
@@ -448,6 +666,7 @@ def render_yolo_world_detections(
         img,
         boxes.cpu(),
         labels=labels,
+        colors=box_colors,
         width=max(1, min(3, w // 128)),
     )
     return out.permute(1, 2, 0).contiguous().numpy().astype(np.uint8)
@@ -464,12 +683,21 @@ def run_pipeline_on_obs(
     grounding_tags: list[str],
     token_encoder: str = "sam",
 ) -> tuple[
-    np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, str, int, int
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    str,
+    int,
+    int,
 ]:
     """
-    Return rgb_u8, ms_u8, yolo_viz_u8, segdac_inst_u8, union_u8, print_block, h, w.
+    Return rgb_u8, ms_u8, yolo_viz_u8, segdac_inst_u8, union_u8, token_enc_viz_u8,
+    print_block, h, w.
     SegDAC forward uses RGB upsampled to seg_model.segmenter_image_size; outputs for
-    the last two panels are resampled to native (h, w) to align with ManiSkill columns.
+    the last three panels are resampled to native (h, w) to align with ManiSkill columns.
     """
     rgb = obs["sensor_data"][cam]["rgb"]
     h, w = int(rgb.shape[1]), int(rgb.shape[2])
@@ -489,10 +717,12 @@ def run_pipeline_on_obs(
         return_phase_timings=False,
         token_encoder=token_encoder,
     )
+    xyxy_list = getattr(seg_model, "last_yolo_xyxy", None) or []
+    cls_list = getattr(seg_model, "last_yolo_classes", None) or []
     yolo_viz = render_yolo_world_detections(
         rgb_n,
-        seg_model.last_yolo_xyxy,
-        seg_model.last_yolo_classes,
+        xyxy_list,
+        cls_list,
         0,
         grounding_tags,
     )
@@ -507,11 +737,29 @@ def run_pipeline_on_obs(
     bm = common.to_numpy(bm_t)
     sgi = to_uint8_image(segdac_masks_to_instance_rgb(bm, h, w))
 
+    mp = _token_encoder_min_pixels(seg_enc)
+    tok_hw = build_token_encoder_viz(
+        sd,
+        pixels_seg,
+        seg_enc,
+        seg_model,
+        token_encoder,
+        sraw,
+        mp,
+    )
+    if int(tok_hw.shape[0]) != h or int(tok_hw.shape[1]) != w:
+        tok_t = tok_hw.permute(2, 0, 1).unsqueeze(0).contiguous()
+        tok_t = F.interpolate(
+            tok_t, size=(h, w), mode="bilinear", align_corners=False
+        )
+        tok_hw = tok_t[0].permute(1, 2, 0).contiguous()
+    tok_viz_u8 = to_uint8_image(tok_hw.cpu().numpy())
+
     emb = out["embeddings"]
     s_sz = int(seg_model.segmenter_image_size)
     enc_lbl = {
         "sam": "SAM + pool (one ViT, map from segment())",
-        "dinov2": "DinoV2ImageEncoder on rgb_segments (image_encoders/ + adapter)",
+        "dinov2": "DINO patch map on full frame + mask pool (same as SAM cells, image_encoders/ + adapter)",
         "random": "RandomImageEncoder (image_encoders/ + adapter, debug)",
         "sam_image": "SamImageEncoder + spatial pool (2nd ViT, image_encoders/ + adapter)",
     }.get(token_encoder, token_encoder)
@@ -530,6 +778,13 @@ def run_pipeline_on_obs(
         lines.append(
             "  sam_encoder raw: (omitted; use --token-encoder sam to dump map features)"
         )
+    viz_note = {
+        "sam": "PCA + dimmer RGB; pool bright/dim; per-object pastel outlines on pooled cells",
+        "sam_image": "PCA + dimmer RGB; pool bright/dim; per-object pastel outlines (2nd SAM map)",
+        "dinov2": "PCA + dimmer RGB; pool bright/dim; per-object pastel outlines (DINO pool)",
+        "random": "tinted background (no spatial encoder features)",
+    }.get(token_encoder, "PCA + pool highlight")
+    lines.append(f"  token-encoder viz: {viz_note}")
     info = "\n".join(lines)
     return (
         rgb_n,
@@ -537,6 +792,7 @@ def run_pipeline_on_obs(
         yolo_viz,
         sgi,
         to_uint8_image(un),
+        tok_viz_u8,
         info,
         h,
         w,
@@ -550,6 +806,7 @@ def get_panel_titles(cam: str) -> list[str]:
         "YOLO-World (text classes + boxes)",
         "SegDAC (instance masks)",
         "SegDAC union of masks × RGB",
+        "Token encoder (PCA + pool highlight + per-object pastel outlines)",
     ]
 
 
@@ -634,14 +891,14 @@ def main() -> None:
         if args.token_encoder == "sam":
             seg_enc = SamEncoderEmbeddingsSegmentsEncoder(512, min_pixels=4)
         elif args.token_encoder == "dinov2":
-            from segdac.networks.image_encoders.dinov2 import DinoV2ImageEncoder
+            from segdac.networks.image_encoders.dinov2 import DinoV2DenseMapEncoder
             from segdac.networks.segments_encoders.image_encoder_segment_adapter import (
                 ImageEncoderSegmentTokensAdapter,
             )
 
             seg_enc = ImageEncoderSegmentTokensAdapter(
-                DinoV2ImageEncoder(),
-                mode="global",
+                DinoV2DenseMapEncoder(),
+                mode="spatial_from_full_image",
                 segmenter_image_size=512,
                 min_pixels=4,
             )
@@ -700,7 +957,7 @@ def main() -> None:
         if args.one_shot:
             if not args.no_random_step:
                 obs, _, _, _, _ = env.step(env.action_space.sample())
-            r, m, yv, s, u, block, _h, _w = run_pipeline_on_obs(
+            r, m, yv, s, u, tok, block, _h, _w = run_pipeline_on_obs(
                 obs,
                 cam,
                 device,
@@ -712,8 +969,8 @@ def main() -> None:
             )
             print("\n" + block)
             titles = get_panel_titles(cam)
-            fig, axes = plt.subplots(1, 5, figsize=(26, 4.5))
-            for ax, img, t in zip(axes, (r, m, yv, s, u), titles, strict=True):
+            fig, axes = plt.subplots(1, 6, figsize=(31, 4.5))
+            for ax, img, t in zip(axes, (r, m, yv, s, u, tok), titles, strict=True):
                 ax.imshow(img)
                 ax.set_title(t, fontsize=10, pad=8)
                 ax.set_axis_off()
@@ -736,8 +993,8 @@ def main() -> None:
         )
         plt.ion()
         panel_titles = get_panel_titles(cam)
-        fig, axes = plt.subplots(1, 5, figsize=(26, 5.5))
-        im_arts: list = [None] * 5
+        fig, axes = plt.subplots(1, 6, figsize=(31, 5.5))
+        im_arts: list = [None] * 6
         # [0]: unblocked; [1]: should quit
         kstate = [False, False]
 
@@ -753,7 +1010,7 @@ def main() -> None:
         step_n = 0
         first = True
         while not kstate[1]:
-            r, m, yv, s, u, block, _h, _w = run_pipeline_on_obs(
+            r, m, yv, s, u, tok, block, _h, _w = run_pipeline_on_obs(
                 obs,
                 cam,
                 device,
@@ -763,7 +1020,7 @@ def main() -> None:
                 grounding,
                 token_encoder=str(args.token_encoder),
             )
-            panels = (r, m, yv, s, u)
+            panels = (r, m, yv, s, u, tok)
             print(
                 f"\n--- frame @ sim counter {step_n} (SegDAC + ManiSkill) ---\n" + block,
             )
