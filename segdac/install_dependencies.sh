@@ -40,6 +40,20 @@ else
     echo "YOLO World weights already exists: $WEIGHTS_FOLDER/$YOLO_WEIGHTS_FILE"
 fi
 
+# Download DINOv2 weights (state dict, expected at weights/dinov2/dinov2_vits14.pth;
+# torch.hub fetches the dinov2 code from GitHub; only this file lives under the repo)
+mkdir -p "$WEIGHTS_FOLDER/dinov2"
+DINOV2_WEIGHTS_BASENAME="dinov2_vits14_pretrain.pth"
+DINOV2_WEIGHTS_FILE_URL="https://dl.fbaipublicfiles.com/dinov2/dinov2_vits14/$DINOV2_WEIGHTS_BASENAME"
+DINOV2_NESTED="$WEIGHTS_FOLDER/dinov2/dinov2_vits14.pth"
+if [ ! -f "$DINOV2_NESTED" ]; then
+    echo "Downloading DINOv2 (ViT-S/14) to $DINOV2_NESTED..."
+    wget -q -O "$DINOV2_NESTED" "$DINOV2_WEIGHTS_FILE_URL"
+    echo "Download complete: $DINOV2_NESTED"
+else
+    echo "DINOv2 weights already exists: $DINOV2_NESTED"
+fi
+
 # CLIP (required by YOLO)
 pip install git+https://github.com/openai/CLIP.git
 

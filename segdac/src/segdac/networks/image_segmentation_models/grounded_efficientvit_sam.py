@@ -1,3 +1,5 @@
+import time
+
 import torch
 import torch.nn.functional as F
 import torchvision.transforms.v2 as v2
@@ -120,6 +122,14 @@ class GroundedEfficientVitSam:
 
         return segmenter_image_size
 
+    def _is_cuda(self) -> bool:
+        """`device` is stored as str (e.g. 'cuda'); accept torch.device too."""
+        d = self.device
+        if isinstance(d, torch.device):
+            return d.type == "cuda"
+        s = str(d)
+        return s == "cuda" or s.startswith("cuda:")
+
     @torch.no_grad()
     def segment(
         self,
@@ -127,6 +137,7 @@ class GroundedEfficientVitSam:
         save_bounding_boxes: bool = False,
         verbose: bool = False,
         return_sam_encoder_embeddings: bool = False,
+        return_phase_timings: bool = False,
     ) -> TensorDict | tuple[TensorDict, torch.Tensor]:
         """
         Inputs :
@@ -142,12 +153,21 @@ class GroundedEfficientVitSam:
                 masks_absolute_bboxes: (N, 4) absolute bbox coords between (0,H-1) and (0,W-1) in (xmin, ymin, xmax, ymax) format.
                 masks_normalized_bboxes: (N, 4) The normalized bbox coords in (0,1) range, still in (xmin, ymin, xmax, ymax) format.
         """
+        def _sync_for_timings() -> None:
+            if return_phase_timings and self._is_cuda():
+                torch.cuda.synchronize()
+
+        _sync_for_timings()
+        t_segment_start = time.perf_counter()
         images_bboxes_xyxy, images_bboxes_classes = self.predict_bounding_boxes(
             image, save=save_bounding_boxes, verbose=verbose
         )
         # Same YOLO outputs as used for SAM; test harness can draw boxes without a second forward.
         self.last_yolo_xyxy = images_bboxes_xyxy
         self.last_yolo_classes = images_bboxes_classes
+
+        _sync_for_timings()
+        t_after_object_detection = time.perf_counter()
 
         image_ids = []
         images_binary_masks = []
@@ -227,6 +247,15 @@ class GroundedEfficientVitSam:
             batch_size=torch.Size([nb_segments]),
             device=self.device,
         )
+
+        if return_phase_timings:
+            _sync_for_timings()
+            t_segment_end = time.perf_counter()
+            self.last_segment_phase_timings = {
+                "object_detection_s": t_after_object_detection
+                - t_segment_start,
+                "segmentation_s": t_segment_end - t_after_object_detection,
+            }
 
         if return_sam_encoder_embeddings:
             return segments_data, sam_encoder_embeddings

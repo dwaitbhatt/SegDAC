@@ -1,26 +1,38 @@
+import os
+
 import torch
 import torch.nn as nn
 from torchvision.transforms import v2
 
 
 class DinoV2ImageEncoder(nn.Module):
+    """DINOv2 image encoder. Builds the backbone via torch.hub and loads a local
+    pretrain file at ``{weights_dir}/dinov2/{arch}.pth`` (e.g. ``weights/dinov2/dinov2_vits14.pth``).
+    A plain checkpoint directory (weights only) is *not* a valid ``torch.hub`` local
+    ``repo``; the hub *code* comes from ``facebookresearch/dinov2`` (cached after first
+    use). Only the .pth is expected in ``weights/``.
+    """
+
     def __init__(
         self,
-        repo_or_dir: str = "weights/dinov2",
+        hub_repo: str = "facebookresearch/dinov2",
         model: str = "dinov2_vits14",
-        source: str = "local",
-        pretrained: bool = True,
-    ):
+        source: str = "github",
+        pretrained: bool = False,
+        weights_dir: str = "weights",
+    ) -> None:
         super().__init__()
-        model = torch.hub.load(
-            repo_or_dir=repo_or_dir, model=model, source=source, pretrained=pretrained
+        arch = model
+        weights_path = os.path.join(weights_dir, "dinov2", f"{arch}.pth")
+        backbone = torch.hub.load(
+            hub_repo, arch, source=source, pretrained=pretrained
         ).eval()
-        if source == "local":
-            model.load_state_dict(torch.load(f"weights/{model}.pth"))
-        for param in model.parameters():
+        sd = torch.load(weights_path, map_location="cpu", weights_only=True)
+        backbone.load_state_dict(sd, strict=True)
+        for param in backbone.parameters():
             param.requires_grad = False
 
-        self.model = model
+        self.model = backbone
 
         # Image is assumed to be float32 in range [0,1] already
         self.transforms = v2.Compose(

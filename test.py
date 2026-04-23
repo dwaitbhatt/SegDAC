@@ -27,6 +27,7 @@ import gymnasium as gym
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from mani_skill.utils import common
 from mani_skill.utils.structs import Actor, Link
@@ -180,6 +181,21 @@ def build_parser() -> argparse.ArgumentParser:
         default=5,
         help="Untimed warmup steps before --fps measurement (default 5)",
     )
+    p.add_argument(
+        "--token-encoder",
+        type=str,
+        choices=("sam", "dinov2", "random", "sam_image"),
+        default="sam",
+        help="Object tokens: sam=pool SAM feature map (default); dinov2=DinoV2ImageEncoder+adapter "
+        "on rgb_segments; random=RandomImageEncoder+adapter (debug); "
+        "sam_image=image_encoders.SamImageEncoder+spatial adapter (2nd ViT run vs segment model).",
+    )
+    p.add_argument(
+        "--random-encoder-dim",
+        type=int,
+        default=128,
+        help="Output dim for --token-encoder random.",
+    )
     return p
 
 
@@ -188,15 +204,43 @@ def extract_object_tokens(
     pixels_01: torch.Tensor,
     device: str,
     segmentation_model: GroundedEfficientVitSam,
-    segments_encoder: SamEncoderEmbeddingsSegmentsEncoder,
+    segments_encoder: nn.Module,
+    return_phase_timings: bool = False,
+    token_encoder: str = "sam",
 ) -> tuple:
     pixels_01 = pixels_01.to(device)
-    segments_data, sam_enc = segmentation_model.segment(
-        pixels_01, return_sam_encoder_embeddings=True
+    r = segmentation_model.segment(
+        pixels_01,
+        return_sam_encoder_embeddings=token_encoder == "sam",
+        return_phase_timings=return_phase_timings,
     )
-    sam_for_print = sam_enc
-    sam_enc = sam_enc.unsqueeze(1)
-    segments_encoder_out = segments_encoder(segments_data, sam_enc)
+    if token_encoder == "sam":
+        segments_data, sam_enc = r
+        sam_for_print = sam_enc
+        sam_enc = sam_enc.unsqueeze(1)
+        if return_phase_timings:
+            if device == "cuda":
+                torch.cuda.synchronize()
+            t_tok0 = time.perf_counter()
+        segments_encoder_out = segments_encoder(segments_data, sam_enc)
+    else:
+        segments_data = r
+        sam_for_print = None
+        if return_phase_timings:
+            if device == "cuda":
+                torch.cuda.synchronize()
+            t_tok0 = time.perf_counter()
+        if getattr(segments_encoder, "needs_full_image", False):
+            segments_encoder_out = segments_encoder(segments_data, pixels_01)
+        else:
+            segments_encoder_out = segments_encoder(segments_data)
+    if return_phase_timings:
+        if device == "cuda":
+            torch.cuda.synchronize()
+        t_tok1 = time.perf_counter()
+        timings = dict(segmentation_model.last_segment_phase_timings)
+        timings["token_encoder_s"] = t_tok1 - t_tok0
+        segmentation_model.last_pipeline_timings = timings
     return segments_data, segments_encoder_out, sam_for_print
 
 
@@ -206,15 +250,33 @@ def forward_segdac_object_tokens(
     cam: str,
     device: str,
     seg_model: GroundedEfficientVitSam,
-    seg_enc: SamEncoderEmbeddingsSegmentsEncoder,
+    seg_enc: nn.Module,
+    return_phase_timings: bool = False,
+    token_encoder: str = "sam",
 ):
-    """RGB from obs -> segmenter res -> Grounded SAM + token encoder (no viz / numpy)."""
+    """RGB from obs -> segmenter res -> YOLO + SAM + chosen token head (no viz / numpy)."""
     rgb = obs["sensor_data"][cam]["rgb"]
     pixels_01 = rgb.permute(0, 3, 1, 2).contiguous().float() / 255.0
+    if return_phase_timings:
+        if device == "cuda":
+            torch.cuda.synchronize()
+        t_prep0 = time.perf_counter()
     pixels_seg = pixels_to_segmenter_res(pixels_01, device, seg_model)
+    if return_phase_timings:
+        if device == "cuda":
+            torch.cuda.synchronize()
+        t_prep1 = time.perf_counter()
     _sd, out, _sraw = extract_object_tokens(
-        pixels_seg, device, seg_model, seg_enc
+        pixels_seg,
+        device,
+        seg_model,
+        seg_enc,
+        return_phase_timings=return_phase_timings,
+        token_encoder=token_encoder,
     )
+    if return_phase_timings:
+        seg_model.last_pipeline_timings = dict(seg_model.last_pipeline_timings)
+        seg_model.last_pipeline_timings["rgb_to_segmenter_s"] = t_prep1 - t_prep0
     return out["embeddings"]
 
 
@@ -224,25 +286,56 @@ def run_fps_benchmark(
     cam: str,
     device: str,
     seg_model: GroundedEfficientVitSam,
-    seg_enc: SamEncoderEmbeddingsSegmentsEncoder,
+    seg_enc: nn.Module,
     n_warmup: int,
     n_steps: int,
+    token_encoder: str,
 ) -> None:
-    """Time: random env.step, then full SegDAC token extraction; prints FPS."""
+    """Time: random env.step, then full SegDAC token extraction; prints FPS and phase times."""
     for _ in range(n_warmup):
         action = env.action_space.sample()
         obs, _, _, _, _ = env.step(action)
-        _ = forward_segdac_object_tokens(obs, cam, device, seg_model, seg_enc)
+        _ = forward_segdac_object_tokens(
+            obs,
+            cam,
+            device,
+            seg_model,
+            seg_enc,
+            return_phase_timings=False,
+            token_encoder=token_encoder,
+        )
     if device == "cuda":
         torch.cuda.synchronize()
     t0 = time.perf_counter()
+    acc_step = 0.0
+    acc_pipe: dict[str, float] = {
+        "rgb_to_segmenter_s": 0.0,
+        "object_detection_s": 0.0,
+        "segmentation_s": 0.0,
+        "token_encoder_s": 0.0,
+    }
     for _ in range(n_steps):
         action = env.action_space.sample()
+        if device == "cuda":
+            torch.cuda.synchronize()
+        t_env0 = time.perf_counter()
         obs, _, _, _, _ = env.step(action)
+        if device == "cuda":
+            torch.cuda.synchronize()
+        t_env1 = time.perf_counter()
+        acc_step += t_env1 - t_env0
         emb = forward_segdac_object_tokens(
-            obs, cam, device, seg_model, seg_enc
+            obs,
+            cam,
+            device,
+            seg_model,
+            seg_enc,
+            return_phase_timings=True,
+            token_encoder=token_encoder,
         )
-        _ = emb.shape  # keep result live
+        _ = emb.shape
+        for k in acc_pipe:
+            acc_pipe[k] += float(seg_model.last_pipeline_timings[k])
     if device == "cuda":
         torch.cuda.synchronize()
     t1 = time.perf_counter()
@@ -251,10 +344,36 @@ def run_fps_benchmark(
         print("FPS: (elapsed time too small to measure)")
         return
     fps = n_steps / elapsed
-    ms = 1000.0 * elapsed / n_steps
+    ms_frame = 1000.0 * elapsed / n_steps
+    n = float(n_steps)
+    m_env = 1000.0 * acc_step / n
+    m_rgb = 1000.0 * acc_pipe["rgb_to_segmenter_s"] / n
+    m_od = 1000.0 * acc_pipe["object_detection_s"] / n
+    m_seg = 1000.0 * acc_pipe["segmentation_s"] / n
+    m_tok = 1000.0 * acc_pipe["token_encoder_s"] / n
+    m_segdac = m_rgb + m_od + m_seg + m_tok
     print(
         f"env.step + SegDAC (grounded YOLO + SAM + object-token head): {fps:.2f} FPS  "
-        f"({n_steps} timed steps in {elapsed:.3f} s, {ms:.2f} ms / frame)"
+        f"({n_steps} timed steps in {elapsed:.3f} s, {ms_frame:.2f} ms / full iteration)"
+    )
+    tok_lbl = {
+        "sam": "SAM-feature pool (SegDAC head)",
+        "dinov2": "DinoV2ImageEncoder + segment adapter (global)",
+        "random": "RandomImageEncoder + segment adapter (global)",
+        "sam_image": "SamImageEncoder + segment adapter (spatial, extra ViT run)",
+    }.get(
+        token_encoder, token_encoder
+    )
+    print("  Per-iteration means (ms):")
+    print(f"    env.step: {m_env:.2f}")
+    print(f"    RGB to segmenter res: {m_rgb:.2f}")
+    print(f"    Object detection (YOLO-World): {m_od:.2f}")
+    print(f"    Segmentation (SAM + masks, post-YOLO): {m_seg:.2f}")
+    print(f"    Object-token encoding ({tok_lbl}): {m_tok:.2f}")
+    print(
+        f"    Subtotal (RGB + YOLO + SAM + token head): {m_segdac:.2f} ms  "
+        f"(+ env.step = ~{m_env + m_segdac:.2f} ms, vs full loop {ms_frame:.2f} ms; "
+        "overhead = extra sync, Python, etc.)"
     )
 
 
@@ -340,9 +459,10 @@ def run_pipeline_on_obs(
     cam: str,
     device: str,
     seg_model: GroundedEfficientVitSam,
-    seg_enc: SamEncoderEmbeddingsSegmentsEncoder,
+    seg_enc: nn.Module,
     selected_id: int | None,
     grounding_tags: list[str],
+    token_encoder: str = "sam",
 ) -> tuple[
     np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, str, int, int
 ]:
@@ -362,7 +482,12 @@ def run_pipeline_on_obs(
 
     pixels_seg = pixels_to_segmenter_res(pixels_01, device, seg_model)
     sd, out, sraw = extract_object_tokens(
-        pixels_seg, device, seg_model, seg_enc
+        pixels_seg,
+        device,
+        seg_model,
+        seg_enc,
+        return_phase_timings=False,
+        token_encoder=token_encoder,
     )
     yolo_viz = render_yolo_world_detections(
         rgb_n,
@@ -384,15 +509,27 @@ def run_pipeline_on_obs(
 
     emb = out["embeddings"]
     s_sz = int(seg_model.segmenter_image_size)
+    enc_lbl = {
+        "sam": "SAM + pool (one ViT, map from segment())",
+        "dinov2": "DinoV2ImageEncoder on rgb_segments (image_encoders/ + adapter)",
+        "random": "RandomImageEncoder (image_encoders/ + adapter, debug)",
+        "sam_image": "SamImageEncoder + spatial pool (2nd ViT, image_encoders/ + adapter)",
+    }.get(token_encoder, token_encoder)
     lines = [
         "  --- SegDAC object token / segment tensor shapes ---",
+        f"  token encoder: {enc_lbl}",
         f"  (forward at segmenter res {s_sz}x{s_sz}; ManiSkill panels are {h}x{w})",
         f"  segments_encoder_output['embeddings'] (object tokens): {tuple(emb.shape)}  (N x D)",
         f"  binary_masks: {tuple(sd['binary_masks'].shape)}",
         f"  image_ids: {tuple(sd['image_ids'].shape)}",
         f"  classes (YOLO per mask): {tuple(sd['classes'].shape)}",
-        f"  sam_encoder raw features: {tuple(sraw.shape)}",
     ]
+    if sraw is not None:
+        lines.append(f"  sam_encoder raw features: {tuple(sraw.shape)}")
+    else:
+        lines.append(
+            "  sam_encoder raw: (omitted; use --token-encoder sam to dump map features)"
+        )
     info = "\n".join(lines)
     return (
         rgb_n,
@@ -481,9 +618,10 @@ def main() -> None:
         weights = Path("weights")
         yolo = weights / "yolov8s-worldv2.pt"
         sam_w = weights / "efficientvit_sam_l0.pt"
-        if not yolo.is_file() or not sam_w.is_file():
+        dinov2_w = weights / "dinov2/dinov2_vits14.pth"
+        if not yolo.is_file() or not sam_w.is_file() or not dinov2_w.is_file():
             print(
-                f"Expected {yolo} and {sam_w}. "
+                f"Expected {yolo} and {sam_w} and {dinov2_w}. "
                 "Run segdac/install_dependencies.sh from the repo root."
             )
 
@@ -493,7 +631,48 @@ def main() -> None:
             object_detector_weights_path=str(yolo),
             segmenter_weights_path=str(sam_w),
         )
-        seg_enc = SamEncoderEmbeddingsSegmentsEncoder(512, min_pixels=4)
+        if args.token_encoder == "sam":
+            seg_enc = SamEncoderEmbeddingsSegmentsEncoder(512, min_pixels=4)
+        elif args.token_encoder == "dinov2":
+            from segdac.networks.image_encoders.dinov2 import DinoV2ImageEncoder
+            from segdac.networks.segments_encoders.image_encoder_segment_adapter import (
+                ImageEncoderSegmentTokensAdapter,
+            )
+
+            seg_enc = ImageEncoderSegmentTokensAdapter(
+                DinoV2ImageEncoder(),
+                mode="global",
+                segmenter_image_size=512,
+                min_pixels=4,
+            )
+        elif args.token_encoder == "random":
+            from segdac.networks.image_encoders.random import RandomImageEncoder
+            from segdac.networks.segments_encoders.image_encoder_segment_adapter import (
+                ImageEncoderSegmentTokensAdapter,
+            )
+
+            seg_enc = ImageEncoderSegmentTokensAdapter(
+                RandomImageEncoder(int(args.random_encoder_dim)),
+                mode="global",
+                segmenter_image_size=512,
+                min_pixels=4,
+            )
+        else:
+            from segdac.networks.image_encoders.sam import SamImageEncoder
+            from segdac.networks.segments_encoders.image_encoder_segment_adapter import (
+                ImageEncoderSegmentTokensAdapter,
+            )
+
+            s_img = SamImageEncoder(
+                segmenter_model_name="efficientvit-sam-l0",
+                segmenter_weights_path=str(sam_w),
+            )
+            seg_enc = ImageEncoderSegmentTokensAdapter(
+                s_img,
+                mode="spatial_from_full_image",
+                segmenter_image_size=512,
+                min_pixels=4,
+            )
         if device == "cuda":
             seg_enc = seg_enc.to(device)
 
@@ -501,7 +680,8 @@ def main() -> None:
         if args.fps:
             print(
                 f"FPS mode: {args.fps_warmup} warmup steps, {args.fps_steps} timed steps, "
-                f"device={device!r}, env_id={args.env_id!r}"
+                f"device={device!r}, env_id={args.env_id!r}, "
+                f"token_encoder={args.token_encoder!r}"
             )
             run_fps_benchmark(
                 env,
@@ -512,6 +692,7 @@ def main() -> None:
                 seg_enc,
                 n_warmup=int(args.fps_warmup),
                 n_steps=int(args.fps_steps),
+                token_encoder=str(args.token_encoder),
             )
             return
 
@@ -520,7 +701,14 @@ def main() -> None:
             if not args.no_random_step:
                 obs, _, _, _, _ = env.step(env.action_space.sample())
             r, m, yv, s, u, block, _h, _w = run_pipeline_on_obs(
-                obs, cam, device, seg_model, seg_enc, fil, grounding
+                obs,
+                cam,
+                device,
+                seg_model,
+                seg_enc,
+                fil,
+                grounding,
+                token_encoder=str(args.token_encoder),
             )
             print("\n" + block)
             titles = get_panel_titles(cam)
@@ -566,7 +754,14 @@ def main() -> None:
         first = True
         while not kstate[1]:
             r, m, yv, s, u, block, _h, _w = run_pipeline_on_obs(
-                obs, cam, device, seg_model, seg_enc, fil, grounding
+                obs,
+                cam,
+                device,
+                seg_model,
+                seg_enc,
+                fil,
+                grounding,
+                token_encoder=str(args.token_encoder),
             )
             panels = (r, m, yv, s, u)
             print(
