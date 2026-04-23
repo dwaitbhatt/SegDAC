@@ -145,6 +145,9 @@ class GroundedEfficientVitSam:
         images_bboxes_xyxy, images_bboxes_classes = self.predict_bounding_boxes(
             image, save=save_bounding_boxes, verbose=verbose
         )
+        # Same YOLO outputs as used for SAM; test harness can draw boxes without a second forward.
+        self.last_yolo_xyxy = images_bboxes_xyxy
+        self.last_yolo_classes = images_bboxes_classes
 
         image_ids = []
         images_binary_masks = []

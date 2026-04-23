@@ -7,7 +7,6 @@ name = "segdac"
 version = "0.0.1"
 authors = [{ name = "Alexandre Brown", email = "alexandre.brown@mila.quebec" }]
 description = "SegDAC, a Segmentation-Driven Actor-Critic method for visual deep reinforcement learning"
-readme = "README.md"
 requires-python = ">=3.9"
 classifiers = [
   "Programming Language :: Python :: 3",

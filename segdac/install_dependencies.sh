@@ -1,8 +1,12 @@
 #!/bin/bash
+# Run from the SegDAC repository root so ./weights/ resolves.
+set -e
+cd "$(dirname "$0")/.."
 
-pip install -r ./segdac_dev/requirements.txt
+# test.py: ManiSkill + visualization + env (setuptools pin matches mani_skill expectations)
+pip install "mani_skill==3.0.0b21" "gymnasium" "matplotlib" "numpy" "setuptools<82"
 
-pip install -r ./segdac/requirements.txt
+pip install -r segdac/requirements.txt
 
 # Use the WEIGHTS_FOLDER environment variable if set, otherwise default to "weights"
 : "${WEIGHTS_FOLDER:=weights}"
@@ -39,11 +43,9 @@ fi
 # CLIP (required by YOLO)
 pip install git+https://github.com/openai/CLIP.git
 
-echo "Downloading CLIP weights..."
-mkdir -p $WEIGHTS_FOLDER/clip/
-wget https://openaipublic.azureedge.net/clip/models/40d365715913c9da98579312b702a82c18be219cc2a73407c4526f58eba950af/ViT-B-32.pt -O $WEIGHTS_FOLDER/clip/ViT-B-32.pt
-echo "Download complete!"
-
 pip uninstall -y opencv-python                # We use headless instead
 pip uninstall -y opencv-python-headless       # Remove partial install (pip uninstall -y opencv-python will remove cv2 as well so we need to re-install headless)
 pip install opencv-python-headless==4.11.0.86 # Re-install headless correctly
+
+# Editable install of the minimal segdac package (required for test.py)
+pip install -e segdac
