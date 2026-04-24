@@ -66,6 +66,10 @@ def build_panels(
     res = proc.process(pixels_01)
     _ = res.object_tokens.shape
 
+    assert len(res.seg_mask_classes) == int(res.seg_masks.shape[0]), (
+        "seg_mask_classes must align 1:1 with seg_masks"
+    )
+
     rgb_u8 = (
         (pixels_01[0].clamp(0, 1).permute(1, 2, 0).cpu().numpy() * 255.0)
         .round()
@@ -86,6 +90,7 @@ def build_panels(
         "  --- SegDACProcessor (lazy result) ---",
         f"  object_tokens: {tuple(emb.shape)}  (N × D)",
         f"  seg_masks: {tuple(res.seg_masks.shape)}",
+        f"  seg_mask_classes: {res.seg_mask_classes}",
         f"  img_features: {tuple(res.img_features.shape)}",
         f"  bboxes.xyxy: {tuple(res.bboxes.xyxy.shape)}",
         f"  (forward at segmenter {s_sz}×{s_sz}; mosaic native {h}×{w})",

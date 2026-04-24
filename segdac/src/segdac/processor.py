@@ -222,6 +222,40 @@ class SegDACProcessResult:
         return self._segments_data["binary_masks"]
 
     @property
+    def seg_mask_class_ids(self) -> torch.Tensor:
+        """
+        Per-mask YOLO-World class indices ``(N,)`` ``torch.long``, **aligned 1:1** with
+        ``seg_masks`` rows (same ordering as ``segments_data['binary_masks']``).
+        """
+        self._ensure_segment()
+        assert self._segments_data is not None
+        return self._segments_data["classes"].long().flatten()
+
+    @property
+    def seg_mask_classes(self) -> list[str]:
+        """
+        Per-mask text labels from :attr:`SegDACProcessor.grounding_text_tags`, **same
+        length and order** as ``seg_masks`` (index ``i`` corresponds to mask row ``i``).
+
+        Class IDs come from ``segments_data['classes']``; each ID is mapped to
+        ``grounding_text_tags[id]`` when in range, otherwise ``\"class_{id}\"`` (same
+        convention as bbox visualization in :func:`segdac.processor_viz.render_yolo_world_detections`).
+        """
+        self._ensure_segment()
+        assert self._segments_data is not None
+        tags = self._processor.grounding_text_tags
+        ids = self._segments_data["classes"].long().flatten()
+        n_tag = len(tags)
+        out: list[str] = []
+        for i in range(int(ids.numel())):
+            ci = int(ids[i].item())
+            if 0 <= ci < n_tag:
+                out.append(tags[ci])
+            else:
+                out.append(f"class_{ci}")
+        return out
+
+    @property
     def img_features(self) -> torch.Tensor:
         """
         Full-image token-encoder representation (no per-mask pooling).
