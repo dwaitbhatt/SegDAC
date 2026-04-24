@@ -451,8 +451,9 @@ class SegDACProcessor:
         rgb_u8 = self._native_rgb_u8(result, batch_index)
         xyxy_list = getattr(self.seg_model, "last_yolo_xyxy", None) or []
         cls_list = getattr(self.seg_model, "last_yolo_classes", None) or []
+        conf_list = getattr(self.seg_model, "last_yolo_confidences", None) or []
         return render_yolo_world_detections(
-            rgb_u8, xyxy_list, cls_list, batch_index, list(tags)
+            rgb_u8, xyxy_list, cls_list, conf_list, batch_index, list(tags)
         )
 
     @torch.inference_mode()

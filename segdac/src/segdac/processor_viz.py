@@ -309,6 +309,7 @@ def render_yolo_world_detections(
     rgb_u8: np.ndarray,
     xyxy_list: list,
     classes_list: list,
+    confidences_list: list,
     batch_index: int,
     grounding_tags: list[str],
 ) -> np.ndarray:
@@ -322,6 +323,7 @@ def render_yolo_world_detections(
         return rgb_u8.copy()
     xyxy = xyxy_list[batch_index]
     cls_t = classes_list[batch_index]
+    conf_t = confidences_list[batch_index]
     if xyxy is None or xyxy.numel() == 0:
         return rgb_u8.copy()
     scale = torch.tensor([w, h, w, h], dtype=xyxy.dtype, device=xyxy.device) / 640.0
@@ -338,7 +340,7 @@ def render_yolo_world_detections(
         rgb = COLOR_PALETTE[ci % pal_n]
         box_colors.append((int(rgb[0]), int(rgb[1]), int(rgb[2])))
         if 0 <= ci < len(grounding_tags):
-            labels.append(grounding_tags[ci])
+            labels.append(f"{grounding_tags[ci]} (conf: {100*conf_t[bi]:.2f}%)")
         else:
             labels.append(f"class_{ci}")
     img = torch.from_numpy(rgb_u8).permute(2, 0, 1).contiguous()

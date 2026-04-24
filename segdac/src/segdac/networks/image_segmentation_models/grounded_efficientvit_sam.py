@@ -130,6 +130,27 @@ class GroundedEfficientVitSam:
         s = str(d)
         return s == "cuda" or s.startswith("cuda:")
 
+    def filter_duplicate_bounding_boxes(self, xyxy_coords: list, classes: list, confidences: list) -> tuple[list, list, list]:
+        """
+        If multiple bounding boxes are predicted for the same class, we only retain the one with the highest confidence.
+        """
+        filtered_xyxy_coords = []
+        filtered_classes = []
+        filtered_confidences = []
+        # Iterate over results for different images
+        for image_xyxy_coords, image_class_ids, image_confidences in zip(xyxy_coords, classes, confidences):
+            valid_class_ids = image_class_ids.unique()
+            valid_box_inds = []
+            for class_id in valid_class_ids:
+                class_inds = torch.where(image_class_ids == class_id)[0]
+                class_max_conf_box_ind = class_inds[image_confidences[class_inds].argmax()]
+                valid_box_inds.append(class_max_conf_box_ind.item())
+                
+            filtered_xyxy_coords.append(image_xyxy_coords[valid_box_inds])
+            filtered_classes.append(image_class_ids[valid_box_inds])
+            filtered_confidences.append(image_confidences[valid_box_inds])
+        return filtered_xyxy_coords, filtered_classes, filtered_confidences
+
     @torch.no_grad()
     def segment(
         self,
@@ -138,6 +159,7 @@ class GroundedEfficientVitSam:
         verbose: bool = False,
         return_sam_encoder_embeddings: bool = False,
         return_phase_timings: bool = False,
+        filter_duplicate_bounding_boxes: bool = True,
     ) -> TensorDict | tuple[TensorDict, torch.Tensor]:
         """
         Inputs :
@@ -159,12 +181,19 @@ class GroundedEfficientVitSam:
 
         _sync_for_timings()
         t_segment_start = time.perf_counter()
-        images_bboxes_xyxy, images_bboxes_classes = self.predict_bounding_boxes(
+        images_bboxes_xyxy, images_bboxes_classes, images_bboxes_confidences = self.predict_bounding_boxes(
             image, save=save_bounding_boxes, verbose=verbose
         )
-        # Same YOLO outputs as used for SAM; test harness can draw boxes without a second forward.
+        # Same YOLO outputs as used for SAM; test harness can draw boxes without a second forward. Below used for plotting (unfiltered) bounding boxes.
         self.last_yolo_xyxy = images_bboxes_xyxy
         self.last_yolo_classes = images_bboxes_classes
+        self.last_yolo_confidences = images_bboxes_confidences
+
+        # If multiple bounding boxes are predicted for the same class, we only retain the one with the highest confidence.
+        if filter_duplicate_bounding_boxes:
+            images_bboxes_xyxy, images_bboxes_classes, images_bboxes_confidences = self.filter_duplicate_bounding_boxes(
+                images_bboxes_xyxy, images_bboxes_classes, images_bboxes_confidences
+            )
 
         _sync_for_timings()
         t_after_object_detection = time.perf_counter()
@@ -309,6 +338,7 @@ class GroundedEfficientVitSam:
     ) -> tuple[list, list]:
         xyxy_coords = []
         classes = []
+        confidences = []
         preprocessed_image = self.preprocess_image_for_yolo_world(image)
         detections = self.object_detector.predict(
             preprocessed_image,
@@ -320,8 +350,9 @@ class GroundedEfficientVitSam:
         for detection in detections:
             xyxy_coords.append(detection.boxes.xyxy)
             classes.append(detection.boxes.cls)
-
-        return xyxy_coords, classes
+            confidences.append(detection.boxes.conf)
+        
+        return xyxy_coords, classes, confidences
 
     def preprocess_image_for_yolo_world(self, image: torch.Tensor) -> torch.Tensor:
         """
